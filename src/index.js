@@ -266,7 +266,6 @@ async function startBot() {
               // Construct the structured parameter mapping blueprint object requested in Step 2
               const paymentPayload = {
                 student_name: result.gymnastName,
-                payer_name: analysis.payer_name || whatsappMeta.pushName,
                 amount: result.amount,
                 currency: "RM",
                 date:
@@ -274,8 +273,9 @@ async function startBot() {
                   now.toLocaleDateString("en-GB"),
                 time: currentTimeStr,
                 reference_number: analysis.transaction_id || "N/A",
-                bank_or_platform: analysis.bank_name || "Instant Transfer",
+                bank_or_platform: analysis.payment_method || "Instant Transfer",
                 receipt_number: result.receiptNumber,
+                month_term_covered: analysis.month_term_covered || "N/A",
               };
 
               try {
