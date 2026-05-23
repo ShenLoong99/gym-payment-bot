@@ -141,3 +141,11 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# google credentials
+google-credentials.json
+
+crash-state.json
+last_online.json
+
+auth_info_baileys/

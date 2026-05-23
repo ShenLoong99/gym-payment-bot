@@ -1,0 +1,31 @@
+{
+  "name": "gym-payment-bot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ShenLoong99/gym-payment-bot.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/ShenLoong99/gym-payment-bot/issues"
+  },
+  "homepage": "https://github.com/ShenLoong99/gym-payment-bot#readme",
+  "dependencies": {
+    "@google/genai": "^2.6.0",
+    "@whiskeysockets/baileys": "^7.0.0-rc13",
+    "axios": "^1.16.1",
+    "dotenv": "^17.4.2",
+    "googleapis": "^172.0.0",
+    "html-pdf-node": "^1.0.8",
+    "pdfkit": "^0.18.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
