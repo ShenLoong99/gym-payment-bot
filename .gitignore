@@ -144,8 +144,18 @@ vite.config.ts.timestamp-*
 
 # google credentials
 google-credentials.json
+gcp-credentials.json
 
+# app monitor log files
 crash-state.json
 last_online.json
 
+# whatsapp login session data
 auth_info_baileys/
+
+# Terraform files
+.terraform/
+*.tfstate
+*.tfstate.backup
+terraform.tfvars
+id_rsa.pub

@@ -41,7 +41,7 @@ export function generateReceiptPdfBuffer(payment) {
           <tr>
             <td>
               <div class="academy-title">Airborne Gymnastics Center</div>
-              <div class="academy-tagline">Building Elite Athletic Foundations & Core Character</div>
+              <div class="academy-tagline">Great things take time, be patient</div>
             </td>
             <td class="meta-text">
               <div class="receipt-id">RECEIPT NO: ${payment.receipt_number}</div>
@@ -67,7 +67,7 @@ export function generateReceiptPdfBuffer(payment) {
           </thead>
           <tbody>
             <tr>
-              <td>Gymnastics Academy Training Fees</td>
+              <td>Gymnastics Academy Training Fees (${payment.month_term_covered})</td>
               <td style="text-align: right; font-weight: bold;">${payment.currency || "RM"} ${formattedAmount}</td>
             </tr>
           </tbody>
@@ -76,7 +76,7 @@ export function generateReceiptPdfBuffer(payment) {
         <div class="verification-box">
           <div class="verification-title">Transaction Verification Audit Data</div>
           <div><b>Bank / Platform Reference:</b> ${payment.bank_or_platform || "Direct Gateway Upload"}</div>
-          <div style="margin-top: 3px;"><b>Reference Assignment ID:</b> ${payment.reference_number || "N/A"}</div>
+          <div style="margin-top: 3px;"><b>Reference ID:</b> ${payment.reference_number || "N/A"}</div>
         </div>
 
         <div class="footer">
