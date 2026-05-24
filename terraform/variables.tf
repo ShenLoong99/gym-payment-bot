@@ -28,3 +28,23 @@ variable "ssh_user" {
   type    = string
   default = "tansikai"
 }
+
+variable "github_username" {
+  type        = string
+  description = "Your GitHub username"
+}
+
+variable "repo_name" {
+  type        = string
+  description = "The name of your GitHub repository containing the chatbot code"
+}
+
+variable "git_branch" {
+  type    = string
+  default = "main"
+}
+
+variable "github_token" {
+  type        = string
+  description = "A GitHub Personal Access Token with repo access to clone your code"
+}

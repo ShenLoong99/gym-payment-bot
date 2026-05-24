@@ -6,11 +6,12 @@ dotenv.config();
 const key = process.env.GEMINI_API_KEY;
 const ai = new GoogleGenAI({ apiKey: key });
 
-// Ordered fallback models pool list. Each model represents a fresh, separate RPD free quota tier bucket!
+// Hardened Fallback Pool containing 4 optimal OCR and structured-schema models
 const FREE_MODEL_POOL = [
-  "gemini-2.5-flash-lite", // Default Target
-  "gemini-2.5-flash", // Fallback Target 1
-  "gemini-1.5-flash", // Fallback Target 2
+  "gemini-2.5-flash-lite", // 1. Primary Low-Latency Target
+  "gemini-2.5-flash", // 2. High Reasoning Vision Backup
+  "gemini-2.0-flash", // 3. Ultra-Stable Generation Backup
+  "gemini-2.5-pro", // 4. Elite-Tier Parsing Heavyweight
 ];
 
 export async function extractReceiptData(fileBuffer, mimeType, retries = 3) {
@@ -43,11 +44,9 @@ export async function extractReceiptData(fileBuffer, mimeType, retries = 3) {
     6. FORGERY ANALYSIS: Evaluate layout integrity. Assign a score from 0-100.
   `;
 
-  // Use a pool index cursor that tracks across loop execution iterations
   let modelPoolIndex = 0;
 
   for (let i = 0; i < retries; i++) {
-    // Dynamically pick the model from the remaining pool
     const targetModel = FREE_MODEL_POOL[modelPoolIndex];
 
     try {
@@ -56,7 +55,7 @@ export async function extractReceiptData(fileBuffer, mimeType, retries = 3) {
       );
 
       const response = await ai.models.generateContent({
-        model: targetModel, // Dynamic structural target placement
+        model: targetModel,
         contents: [
           { inlineData: { mimeType: mimeType, data: base64Data } },
           { text: prompt },
@@ -100,9 +99,16 @@ export async function extractReceiptData(fileBuffer, mimeType, retries = 3) {
         },
       });
 
+      // Verification check: make sure text returned is non-empty
+      if (!response.text) {
+        throw new Error("Empty text returned from Gemini channel endpoint.");
+      }
+
       return JSON.parse(response.text);
     } catch (error) {
       const errorMessage = error.message || String(error);
+
+      // Strict Check: Did Google explicitly return a 429 Quota Exhaustion?
       const isQuotaError =
         error.status === 429 ||
         error.statusCode === 429 ||
@@ -111,28 +117,29 @@ export async function extractReceiptData(fileBuffer, mimeType, retries = 3) {
         errorMessage.includes("RESOURCE_EXHAUSTED");
 
       if (isQuotaError) {
-        // If we have models left in the free rotation pool, pivot right away!
         if (modelPoolIndex < FREE_MODEL_POOL.length - 1) {
           modelPoolIndex++;
           console.warn(
-            `🔄 [QUOTA FALLBACK] Model [${targetModel}] exhausted. Swapping to backup model: [${FREE_MODEL_POOL[modelPoolIndex]}] immediately...`,
+            `🔄 [QUOTA FALLBACK] Genuine 429 detected. Swapping to backup model: [${FREE_MODEL_POOL[modelPoolIndex]}]...`,
           );
-
-          // Small 1.5-second buffer sleep to ensure sockets drop cleanly before hitting the alternative pool model
-          await new Promise((resolve) => setTimeout(resolve, 1500));
+          // Cool-down sleep increased to 3 seconds to let parallel webhook traffic clear out cleanly
+          await new Promise((resolve) => setTimeout(resolve, 3000));
           continue;
-        } else if (i < retries - 1) {
-          // If all models in our rotation are completely exhausted, fallback to standard per-minute time backoffs
+        } else {
           console.warn(
-            `⏳ [RATE LIMIT] All pool models exhausted. Sleeping for 16 seconds on standard loop constraint context...`,
+            `⏳ [RATE LIMIT] All pool models saturated. Cooling down for 15 seconds...`,
           );
-          await new Promise((resolve) => setTimeout(resolve, 16000));
+          await new Promise((resolve) => setTimeout(resolve, 15000));
           continue;
         }
       }
 
-      // Log ordinary system network drop exceptions (e.g., 500, 503, timeouts)
-      console.error(`⚠️ [API TRY ${i + 1}/${retries} FAILED]:`, errorMessage);
+      // If it's a standard operational error (e.g., download mismatch or network timeout),
+      // retry on the SAME model first instead of immediately burning fallbacks!
+      console.error(
+        `⚠️ [API TRY ${i + 1}/${retries} FAILED on ${targetModel}]:`,
+        errorMessage,
+      );
 
       if (i === retries - 1) {
         throw new Error(
@@ -140,7 +147,7 @@ export async function extractReceiptData(fileBuffer, mimeType, retries = 3) {
         );
       }
 
-      // Linear backoff logic for standard non-quota errors (e.g., 1.5s, 3s)
+      // Standard incremental backoff delay (1.5s, 3s)
       await new Promise((resolve) => setTimeout(resolve, 1500 * (i + 1)));
     }
   }

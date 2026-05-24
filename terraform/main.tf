@@ -47,16 +47,11 @@ resource "google_compute_firewall" "allow_web" {
 
 # Provision a single e2-micro instance with startup script to set up Node.js environment for the chatbot application
 resource "google_compute_instance" "free_vm" {
-  depends_on = [
-    google_project_service.compute_api,
-    google_compute_firewall.allow_web
-  ]
-
   name         = "airbourne-app-server"
   machine_type = "e2-micro"
   zone         = var.zone
 
-  tags = ["free-tier-vm"]
+  tags = ["free-tier-vm", "http-server", "https-server"]
 
   boot_disk {
     initialize_params {
@@ -69,16 +64,23 @@ resource "google_compute_instance" "free_vm" {
   network_interface {
     network = "default"
     access_config {
-      // Ephemeral public IP address
+      # Empty block allocates a public ephemeral IP address to the instance
     }
   }
 
   metadata = {
     ssh-keys = "${var.ssh_user}:${file(var.ssh_public_key_path)}"
-    startup-script = templatefile("${path.module}/scripts/deploy.sh", {
-      SSH_USER = var.ssh_user
-    })
   }
+
+  metadata_startup_script = templatefile("${path.module}/scripts/deploy.sh", {
+    SSH_USER                = var.ssh_user
+    GITHUB_USERNAME         = var.github_username
+    REPO_NAME               = var.repo_name
+    GIT_BRANCH              = var.git_branch
+    GITHUB_TOKEN            = var.github_token
+    ENV_FILE_CONTENT        = file("${path.module}/../.env")
+    GOOGLE_CREDENTIALS_JSON = file("${path.module}/../google-credentials.json")
+  })
 }
 
 # ==========================================
