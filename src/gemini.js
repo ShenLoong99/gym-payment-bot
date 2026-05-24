@@ -6,15 +6,51 @@ dotenv.config();
 const key = process.env.GEMINI_API_KEY;
 const ai = new GoogleGenAI({ apiKey: key });
 
-// Hardened Fallback Pool containing 4 optimal OCR and structured-schema models
 const FREE_MODEL_POOL = [
-  "gemini-2.5-flash-lite", // 1. Primary Low-Latency Target
-  "gemini-2.5-flash", // 2. High Reasoning Vision Backup
-  "gemini-2.0-flash", // 3. Ultra-Stable Generation Backup
-  "gemini-2.5-pro", // 4. Elite-Tier Parsing Heavyweight
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-flash",
+  "gemini-2.0-flash",
+  "gemini-2.5-pro",
 ];
 
-export async function extractReceiptData(fileBuffer, mimeType, retries = 3) {
+const MAX_RETRIES = FREE_MODEL_POOL.length;
+
+// ── Helper: safely extract text from response regardless of SDK version ───────
+function extractResponseText(response) {
+  // New SDK: response.text is a function
+  if (typeof response.text === "function") {
+    return response.text();
+  }
+  // Old SDK: response.text is a string property
+  if (typeof response.text === "string") {
+    return response.text;
+  }
+  // Fallback: dig into candidates manually
+  const candidate = response?.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (candidate) return candidate;
+
+  throw new Error(
+    `Cannot extract text from response. Keys: ${Object.keys(response).join(", ")}`,
+  );
+}
+
+// ── Helper: strict 429 detection — do NOT trigger on empty/undefined response ─
+function isGenuine429(error) {
+  // Must have explicit HTTP 429 or quota keywords — undefined text is NOT a quota error
+  return (
+    error.status === 429 ||
+    error.statusCode === 429 ||
+    (error.message?.includes("429") && !error.message?.includes("undefined")) ||
+    error.message?.toLowerCase().includes("resource_exhausted") ||
+    error.message?.toLowerCase().includes("quota exceeded")
+  );
+}
+
+export async function extractReceiptData(
+  fileBuffer,
+  mimeType,
+  retries = MAX_RETRIES,
+) {
   const base64Data = fileBuffer.toString("base64");
 
   const prompt = `
@@ -24,34 +60,33 @@ export async function extractReceiptData(fileBuffer, mimeType, retries = 3) {
     CRITICAL FILTER RULES:
     1. CLASSIFICATION & EXCLUSIONS: 
        - Set isGymnasticsFee to true ONLY if this document is a payment confirmation for regular gymnastics ACADEMY/TUITION TRAINING FEES (e.g., monthly fees, term fees, class packages).
-       - ABSOLUTELY REJECT and set isGymnasticsFee to false if the receipt or reference notes payments for merchandise, clothing, equipment, or non-tuition transactions (e.g., "buying leotard", "uniform", "grip bag", "chalk", "t-shirt", "coffee").
+       - ABSOLUTELY REJECT and set isGymnasticsFee to false if the receipt or reference notes payments for merchandise, clothing, equipment, or non-tuition transactions.
     
-    2. DATE EXTRACTION: Find the transaction date and time on the document. Format it EXACTLY as "DD/MM/YYYY HH:mm:ss". If missing, return "".
+    2. DATE EXTRACTION: Format EXACTLY as "DD/MM/YYYY HH:mm:ss". If missing, return "".
     
-    3. RECIPIENT REFERENCE EXTRACTION: Look closely for fields named 'Recipient reference', 'Payment details', 'Remarks', or 'Description'. You MUST extract the FULL literal text match without truncating or changing it. (e.g., "Ng Wing Hin May-Jul" must be returned exactly as "Ng Wing Hin May-Jul").
+    3. RECIPIENT REFERENCE EXTRACTION: Extract the FULL literal text from 'Recipient reference', 'Payment details', 'Remarks', or 'Description' fields without truncating.
     
-    4. PAYMENT METHOD STANDARDIZATION: Normalize strictly into the format: "Bank/eWallet Name - Payment Channel".
+    4. PAYMENT METHOD STANDARDIZATION: Normalize to "Bank/eWallet Name - Payment Channel".
        Examples:
        - Maybank DuitNow Transfer -> "Maybank - DuitNow Transfer"
        - Touch 'n Go eWallet -> "Touch 'n Go - eWallet"
        - Public Bank Online Transfer -> "Public Bank - Internet Banking"
        
-    5. MONTH/TERM COVERED STANDARDIZATION: Parse references to targeted payment months/terms. Standardize output to match: "ShortMonth Year - ShortMonth Year" or "ShortMonth Year".
-       - If it says "May-Jul" and the transaction date is in 2026, infer the year and output: "May 2026 - Jul 2026".
-       - If it says "May 2026", output: "May 2026".
+    5. MONTH/TERM COVERED: Standardize to "ShortMonth Year - ShortMonth Year" or "ShortMonth Year".
+       - "May-Jul" with 2026 transaction date -> "May 2026 - Jul 2026"
        - If missing, return "".
 
-    6. FORGERY ANALYSIS: Evaluate layout integrity. Assign a score from 0-100.
+    6. FORGERY ANALYSIS: Evaluate layout integrity. Assign a score 0-100.
   `;
 
   let modelPoolIndex = 0;
 
-  for (let i = 0; i < retries; i++) {
+  for (let attempt = 0; attempt < retries; attempt++) {
     const targetModel = FREE_MODEL_POOL[modelPoolIndex];
 
     try {
       console.log(
-        `🧠 [GEMINI API] Invoking generation request. Model target: [${targetModel}] (Attempt ${i + 1}/${retries})`,
+        `🧠 [GEMINI API] Model: [${targetModel}] | Attempt ${attempt + 1}/${retries}`,
       );
 
       const response = await ai.models.generateContent({
@@ -70,21 +105,9 @@ export async function extractReceiptData(fileBuffer, mimeType, retries = 3) {
               transaction_date: { type: Type.STRING },
               gymnast_name: { type: Type.STRING },
               amount: { type: Type.NUMBER },
-              reference: {
-                type: Type.STRING,
-                description:
-                  "Full literal text from the reference/remarks field.",
-              },
-              payment_method: {
-                type: Type.STRING,
-                description:
-                  "Standardized format: 'Bank/eWallet name - bank method'",
-              },
-              month_term_covered: {
-                type: Type.STRING,
-                description:
-                  "Standardized format: 'Mmm YYYY - Mmm YYYY' or 'Mmm YYYY'",
-              },
+              reference: { type: Type.STRING },
+              payment_method: { type: Type.STRING },
+              month_term_covered: { type: Type.STRING },
               transaction_id: { type: Type.STRING },
             },
             required: [
@@ -99,56 +122,51 @@ export async function extractReceiptData(fileBuffer, mimeType, retries = 3) {
         },
       });
 
-      // Verification check: make sure text returned is non-empty
-      if (!response.text) {
-        throw new Error("Empty text returned from Gemini channel endpoint.");
+      // ✅ FIX #2: Use version-safe text extractor instead of response.text directly
+      const rawText = extractResponseText(response);
+
+      console.log(`🧠 [GEMINI RAW RESPONSE]: ${rawText}`);
+
+      if (!rawText || rawText.trim() === "") {
+        throw new Error("Empty text returned from Gemini endpoint.");
       }
 
-      return JSON.parse(response.text);
+      // Strip potential markdown fences before parsing
+      const clean = rawText.replace(/```json|```/g, "").trim();
+      return JSON.parse(clean);
     } catch (error) {
       const errorMessage = error.message || String(error);
+      console.error(
+        `⚠️ [ATTEMPT ${attempt + 1}/${retries} FAILED on ${targetModel}]: ${errorMessage}`,
+      );
 
-      // Strict Check: Did Google explicitly return a 429 Quota Exhaustion?
-      const isQuotaError =
-        error.status === 429 ||
-        error.statusCode === 429 ||
-        errorMessage.includes("429") ||
-        errorMessage.toLowerCase().includes("quota") ||
-        errorMessage.includes("RESOURCE_EXHAUSTED");
-
-      if (isQuotaError) {
+      // ✅ FIX #3: Only burn a fallback model on a confirmed real 429
+      if (isGenuine429(error)) {
         if (modelPoolIndex < FREE_MODEL_POOL.length - 1) {
           modelPoolIndex++;
           console.warn(
-            `🔄 [QUOTA FALLBACK] Genuine 429 detected. Swapping to backup model: [${FREE_MODEL_POOL[modelPoolIndex]}]...`,
+            `🔄 [QUOTA FALLBACK] Confirmed 429. Switching to: [${FREE_MODEL_POOL[modelPoolIndex]}]`,
           );
-          // Cool-down sleep increased to 3 seconds to let parallel webhook traffic clear out cleanly
           await new Promise((resolve) => setTimeout(resolve, 3000));
           continue;
         } else {
-          console.warn(
-            `⏳ [RATE LIMIT] All pool models saturated. Cooling down for 15 seconds...`,
-          );
+          console.warn(`⏳ [RATE LIMIT] All models saturated. Cooling 15s...`);
           await new Promise((resolve) => setTimeout(resolve, 15000));
           continue;
         }
       }
 
-      // If it's a standard operational error (e.g., download mismatch or network timeout),
-      // retry on the SAME model first instead of immediately burning fallbacks!
-      console.error(
-        `⚠️ [API TRY ${i + 1}/${retries} FAILED on ${targetModel}]:`,
-        errorMessage,
-      );
-
-      if (i === retries - 1) {
-        throw new Error(
-          `Gemini API exhausted all fallback pool models and retry attempts. Last Error: ${errorMessage}`,
-        );
+      // Non-quota error: retry on SAME model with backoff
+      if (attempt < retries - 1) {
+        const delay = 1500 * (attempt + 1);
+        console.log(`🔁 Retrying same model in ${delay}ms...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
       }
 
-      // Standard incremental backoff delay (1.5s, 3s)
-      await new Promise((resolve) => setTimeout(resolve, 1500 * (i + 1)));
+      throw new Error(
+        `Gemini API failed after all retries. Last error: ${errorMessage}`,
+      );
     }
   }
 }
