@@ -17,15 +17,12 @@ const MAX_RETRIES = FREE_MODEL_POOL.length;
 
 // ── Helper: safely extract text from response regardless of SDK version ───────
 function extractResponseText(response) {
-  // New SDK: response.text is a function
   if (typeof response.text === "function") {
     return response.text();
   }
-  // Old SDK: response.text is a string property
   if (typeof response.text === "string") {
     return response.text;
   }
-  // Fallback: dig into candidates manually
   const candidate = response?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (candidate) return candidate;
 
@@ -34,104 +31,135 @@ function extractResponseText(response) {
   );
 }
 
-// ── Helper: strict 429 detection — do NOT trigger on empty/undefined response ─
+// ── Helper: strict 429 detection ─────────────────────────────────────────────
 function isGenuine429(error) {
-  // Must have explicit HTTP 429 or quota keywords — undefined text is NOT a quota error
   return (
     error.status === 429 ||
     error.statusCode === 429 ||
-    (error.message?.includes("429") && !error.message?.includes("undefined")) ||
-    error.message?.toLowerCase().includes("resource_exhausted") ||
-    error.message?.toLowerCase().includes("quota exceeded")
+    String(error).includes("429") ||
+    String(error).toLowerCase().includes("quota")
   );
 }
 
+/**
+ * Enhanced Gemini extraction schema split to support explicit reference lookups
+ */
+const responseSchema = {
+  type: Type.OBJECT,
+  properties: {
+    isGymnasticsFee: {
+      type: Type.BOOLEAN,
+      description:
+        "True if the document is a bank receipt/payment statement representing tuition/fees paid to Airborne Gymnastics Center.",
+    },
+    forgery_verification_confidence: {
+      type: Type.INTEGER,
+      description:
+        "Confidence rating (1-100) that this document is unaltered and authentic.",
+    },
+    transaction_date: {
+      type: Type.STRING,
+      description:
+        "Date and time of transaction in exact format 'DD/MM/YYYY HH:MM:SS'. For example: '20/05/2026 12:14:00'.",
+    },
+    recipient_reference: {
+      type: Type.STRING,
+      description:
+        "The complete, raw text extracted verbatim from the 'Recipient reference' field (e.g., 'Ng Wing Hin May-Jul'). Essential for student matching.",
+    },
+    transaction_id: {
+      type: Type.STRING,
+      description:
+        "The unique Reference ID tracking number of the transaction (e.g., '018997386M').",
+    },
+    payment_method: {
+      type: Type.STRING,
+      description:
+        "Bank origin name coupled with the transaction framework (e.g., 'Maybank - DuitNow Transfer').",
+    },
+    payment_covered: {
+      type: Type.STRING,
+      enum: ["Monthly", "Termly", "Per Session"],
+      description:
+        "Classify the structure of the payment. Choose 'Monthly' if paying for a single month, 'Termly' if paying for a block/term of multiple months, or 'Per Session' if paying a single walk-in/one-time session fee.",
+    },
+    revenue_start_date: {
+      type: Type.STRING,
+      description:
+        "The exact calendar start date of the period being paid for. For 'June 2026' return '2026-06-01'. For 'May 2026 - Aug 2026' return '2026-05-01'. For a specific session '1 May 2026' return '2026-05-01'.",
+    },
+    amount: {
+      type: Type.NUMBER,
+      description:
+        "The numeric dollar/RM quantity processed on the transaction document ledger.",
+    },
+    gymnast_name: {
+      type: Type.STRING,
+      description:
+        "The explicit student/gymnast name if written anywhere on the invoice note, reference, or description fields.",
+    },
+  },
+  required: [
+    "isGymnasticsFee",
+    "forgery_verification_confidence",
+    "transaction_date",
+    "recipient_reference",
+    "transaction_id",
+    "payment_method",
+    "payment_covered",
+    "revenue_start_date",
+    "amount",
+    "gymnast_name",
+  ],
+};
+
+/**
+ * Core LLM parsing execution pipeline using structural JSON formatting constraints
+ */
 export async function extractReceiptData(
-  fileBuffer,
-  mimeType,
+  pdfBuffer,
+  mimeType = "application/pdf",
   retries = MAX_RETRIES,
 ) {
-  const base64Data = fileBuffer.toString("base64");
-
-  const prompt = `
-    You are a senior security auditing accountant for Airborne Gymnastics Center.
-    Analyze this uploaded document carefully and extract structural values.
-    
-    CRITICAL FILTER RULES:
-    1. CLASSIFICATION & EXCLUSIONS: 
-       - Set isGymnasticsFee to true ONLY if this document is a payment confirmation for regular gymnastics ACADEMY/TUITION TRAINING FEES (e.g., monthly fees, term fees, class packages).
-       - ABSOLUTELY REJECT and set isGymnasticsFee to false if the receipt or reference notes payments for merchandise, clothing, equipment, or non-tuition transactions.
-    
-    2. DATE EXTRACTION: Format EXACTLY as "DD/MM/YYYY HH:mm:ss". If missing, return "".
-    
-    3. RECIPIENT REFERENCE EXTRACTION: Extract the FULL literal text from 'Recipient reference', 'Payment details', 'Remarks', or 'Description' fields without truncating.
-    
-    4. PAYMENT METHOD STANDARDIZATION: Normalize to "Bank/eWallet Name - Payment Channel".
-       Examples:
-       - Maybank DuitNow Transfer -> "Maybank - DuitNow Transfer"
-       - Touch 'n Go eWallet -> "Touch 'n Go - eWallet"
-       - Public Bank Online Transfer -> "Public Bank - Internet Banking"
-       
-    5. MONTH/TERM COVERED: Standardize to "ShortMonth Year - ShortMonth Year" or "ShortMonth Year".
-       - "May-Jul" with 2026 transaction date -> "May 2026 - Jul 2026"
-       - If missing, return "".
-
-    6. FORGERY ANALYSIS: Evaluate layout integrity. Assign a score 0-100.
-  `;
-
   let modelPoolIndex = 0;
 
   for (let attempt = 0; attempt < retries; attempt++) {
     const targetModel = FREE_MODEL_POOL[modelPoolIndex];
-
     try {
       console.log(
-        `🧠 [GEMINI API] Model: [${targetModel}] | Attempt ${attempt + 1}/${retries}`,
+        `🧠 [GEMINI API] Attempt ${attempt + 1}/${retries} using model: [${targetModel}]`,
       );
 
       const response = await ai.models.generateContent({
         model: targetModel,
         contents: [
-          { inlineData: { mimeType: mimeType, data: base64Data } },
-          { text: prompt },
+          {
+            role: "user",
+            parts: [
+              {
+                inlineData: {
+                  data: pdfBuffer.toString("base64"),
+                  mimeType: mimeType,
+                },
+              },
+              {
+                text: "Analyze this transaction slip document. Map out all extraction parameters exactly matching the structured JSON format guidelines provided.",
+              },
+            ],
+          },
         ],
         config: {
           responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              isGymnasticsFee: { type: Type.BOOLEAN },
-              forgery_verification_confidence: { type: Type.INTEGER },
-              transaction_date: { type: Type.STRING },
-              gymnast_name: { type: Type.STRING },
-              amount: { type: Type.NUMBER },
-              reference: { type: Type.STRING },
-              payment_method: { type: Type.STRING },
-              month_term_covered: { type: Type.STRING },
-              transaction_id: { type: Type.STRING },
-            },
-            required: [
-              "isGymnasticsFee",
-              "forgery_verification_confidence",
-              "transaction_date",
-              "reference",
-              "payment_method",
-              "month_term_covered",
-            ],
-          },
+          responseSchema: responseSchema,
+          temperature: 0.1, // Set lower temperature for higher factual accuracy
         },
       });
 
-      // ✅ FIX #2: Use version-safe text extractor instead of response.text directly
       const rawText = extractResponseText(response);
-
-      console.log(`🧠 [GEMINI RAW RESPONSE]: ${rawText}`);
-
       if (!rawText || rawText.trim() === "") {
         throw new Error("Empty text returned from Gemini endpoint.");
       }
 
-      // Strip potential markdown fences before parsing
       const clean = rawText.replace(/```json|```/g, "").trim();
       return JSON.parse(clean);
     } catch (error) {
@@ -140,7 +168,6 @@ export async function extractReceiptData(
         `⚠️ [ATTEMPT ${attempt + 1}/${retries} FAILED on ${targetModel}]: ${errorMessage}`,
       );
 
-      // ✅ FIX #3: Only burn a fallback model on a confirmed real 429
       if (isGenuine429(error)) {
         if (modelPoolIndex < FREE_MODEL_POOL.length - 1) {
           modelPoolIndex++;
@@ -156,17 +183,15 @@ export async function extractReceiptData(
         }
       }
 
-      // Non-quota error: retry on SAME model with backoff
       if (attempt < retries - 1) {
         const delay = 1500 * (attempt + 1);
         console.log(`🔁 Retrying same model in ${delay}ms...`);
         await new Promise((resolve) => setTimeout(resolve, delay));
-        continue;
+      } else {
+        throw new Error(
+          `❌ Gemini extraction execution completely exhausted: ${errorMessage}`,
+        );
       }
-
-      throw new Error(
-        `Gemini API failed after all retries. Last error: ${errorMessage}`,
-      );
     }
   }
 }

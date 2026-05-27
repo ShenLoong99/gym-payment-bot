@@ -25,6 +25,7 @@
     "dotenv": "^17.4.2",
     "googleapis": "^172.0.0",
     "html-pdf-node": "^1.0.8",
+    "node-telegram-bot-api": "^0.67.0",
     "pdfkit": "^0.18.0",
     "qrcode-terminal": "^0.12.0"
   }

@@ -1,6 +1,74 @@
 import htmlPdf from "html-pdf-node";
 
 /**
+ * Helper to convert short month names to full format if needed,
+ * or handle formatting dates directly into clean presentation strings.
+ * Expects revenueStartDate to be YYYY-MM-DD
+ */
+function getDynamicDescription(paymentCovered, revenueStartDate) {
+  const baseDescription = "Gymnastics Academy Training Fees";
+
+  if (!revenueStartDate || revenueStartDate === "N/A") {
+    return `${baseDescription} (${paymentCovered ? paymentCovered.toUpperCase() : "Training"})`;
+  }
+
+  try {
+    const [year, month, day] = revenueStartDate
+      .split("-")
+      .map((num) => parseInt(num, 10));
+    // Create UTC date object to prevent local timezone shifting issues
+    const startDate = new Date(Date.UTC(year, month - 1, day));
+
+    const optionsMonthYear = {
+      month: "short",
+      year: "numeric",
+      timeZone: "UTC",
+    };
+    const optionsDayMonthYear = {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      timeZone: "UTC",
+    };
+
+    const type = String(paymentCovered).toLowerCase().trim();
+
+    if (type === "monthly") {
+      const formattedDate = startDate.toLocaleDateString(
+        "en-GB",
+        optionsMonthYear,
+      ); // e.g. "Feb 2026"
+      return `${baseDescription} (Monthly) ${formattedDate}`;
+    }
+
+    if (type === "per session") {
+      const formattedDate = startDate.toLocaleDateString(
+        "en-GB",
+        optionsDayMonthYear,
+      ); // e.g. "1 Feb 2026"
+      return `${baseDescription} (Per Session) ${formattedDate}`;
+    }
+
+    if (type === "termly") {
+      const startDateStr = startDate.toLocaleDateString(
+        "en-GB",
+        optionsMonthYear,
+      );
+
+      // Compute the end of a 3-month term (Adding 3 months to start date)
+      const endDate = new Date(Date.UTC(year, month - 1 + 3, day));
+      const endDateStr = endDate.toLocaleDateString("en-GB", optionsMonthYear); // e.g. "May 2026"
+
+      return `${baseDescription} (Termly) ${startDateStr} - ${endDateStr}`;
+    }
+
+    return `${baseDescription} (${type})`;
+  } catch (err) {
+    return `${baseDescription} (${paymentCovered})`;
+  }
+}
+
+/**
  * Generates an elegant, modern business invoice layout using standard HTML/CSS templates.
  * @param {Object} payment - Structural transaction fields.
  * @returns {Promise<Buffer>} - Resolves directly with an in-memory PDF buffer file.
@@ -8,6 +76,12 @@ import htmlPdf from "html-pdf-node";
 export function generateReceiptPdfBuffer(payment) {
   return new Promise((resolve, reject) => {
     const formattedAmount = Number(payment.amount).toFixed(2);
+
+    // Dynamically calculate the description line based on your business logic rules
+    const dynamicDescription = getDynamicDescription(
+      payment.payment_covered,
+      payment.revenue_start_date,
+    );
 
     // Clean HTML Structure with professional invoice invoice canvas elements
     const htmlContent = `
@@ -44,9 +118,9 @@ export function generateReceiptPdfBuffer(payment) {
               <div class="academy-tagline">Great things take time, be patient</div>
             </td>
             <td class="meta-text">
-              <div class="receipt-id">RECEIPT NO: ${payment.receipt_number}</div>
-              <div><b>Date:</b> ${new Date().toLocaleDateString()}</div>
-              <div><b>Time:</b> ${new Date().toLocaleTimeString()}</div>
+              <div class="receipt-id">RECEIPT NO: ${payment.receiptNumber || payment.receipt_number}</div>
+              <div><b>Date:</b> ${new Date().toLocaleDateString("en-GB")}</div>
+              <div><b>Time:</b> ${new Date().toLocaleTimeString("en-GB", { hour12: false })}</div>
             </td>
           </tr>
         </table>
@@ -55,7 +129,7 @@ export function generateReceiptPdfBuffer(payment) {
 
         <div class="customer-section">
           <div class="customer-title">RECEIPT TO:</div>
-          <div><b>Student Name:</b> ${payment.student_name || "Unassigned Profile Match"}</div>
+          <div><b>Student Name:</b> ${payment.gymnastName || payment.student_name || "Unassigned Profile Match"}</div>
         </div>
 
         <table class="item-table">
@@ -67,7 +141,7 @@ export function generateReceiptPdfBuffer(payment) {
           </thead>
           <tbody>
             <tr>
-              <td>Gymnastics Academy Training Fees (${payment.month_term_covered})</td>
+              <td>${dynamicDescription}</td>
               <td style="text-align: right; font-weight: bold;">${payment.currency || "RM"} ${formattedAmount}</td>
             </tr>
           </tbody>
@@ -75,8 +149,8 @@ export function generateReceiptPdfBuffer(payment) {
 
         <div class="verification-box">
           <div class="verification-title">Transaction Verification Audit Data</div>
-          <div><b>Bank / Platform Reference:</b> ${payment.bank_or_platform || "Direct Gateway Upload"}</div>
-          <div style="margin-top: 3px;"><b>Reference ID:</b> ${payment.reference_number || "N/A"}</div>
+          <div><b>Bank / Platform Reference:</b> ${payment.paymentMethod || payment.bank_or_platform || "Direct Gateway Upload"}</div>
+          <div style="margin-top: 3px;"><b>Reference ID:</b> ${payment.transactionId || payment.reference_number || "N/A"}</div>
         </div>
 
         <div class="footer">
@@ -88,7 +162,6 @@ export function generateReceiptPdfBuffer(payment) {
     </html>
     `;
 
-    // Process options configuring the page compilation boundaries
     const options = {
       format: "A4",
       margin: { top: "0px", bottom: "0px", left: "0px", right: "0px" },

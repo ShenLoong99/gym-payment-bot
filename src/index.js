@@ -13,6 +13,10 @@ import { extractReceiptData } from "./gemini.js";
 import { appendPaymentRow } from "./sheets.js";
 import { logEvent } from "./logger.js";
 import { generateReceiptPdfBuffer } from "./receiptGenerator.js";
+import {
+  isBotProcessingAllowed,
+  isReplyAndReceiptAllowed,
+} from "./telegramAdmin.js";
 
 // Import crash handling alongside the new standardized Telegram downtime alert function
 import {
@@ -180,6 +184,14 @@ async function startBot() {
     for (const msg of m.messages) {
       if (!msg.message) continue;
 
+      // MASTER SWITCH CHECK
+      if (!isBotProcessingAllowed()) {
+        console.warn(
+          "🛑 [PIPELINE BLOCKED] Incoming message dropped. Master Switch (/toggle_bot) is OFF.",
+        );
+        continue;
+      }
+
       updateLastOnlineTimestamp();
 
       const messageType = Object.keys(msg.message || {})[0];
@@ -252,18 +264,24 @@ async function startBot() {
               "📝 [DATABASE] High confidence threshold met. Syncing row with Google Sheets...",
             );
 
-            // Call updated sheet pipeline wrapper to get access to computed incremental index parameters
+            // Always write records to sheets regardless of the secondary reply switch
             const result = await appendPaymentRow(analysis, whatsappMeta);
 
             if (result.success) {
-              // Isolate current runtime time signatures
+              // REPLY & RECEIPT PIECE CHECK
+              if (!isReplyAndReceiptAllowed()) {
+                console.warn(
+                  "🤫 [REPLY LOCKED] Row logged to Sheets silently. Customer auto-reply & PDF generation are disabled (/toggle_reply_receipt).",
+                );
+                continue; // Terminate execution early before generating PDF or sending messages
+              }
+
               const now = new Date();
               const currentTimeStr = now.toLocaleTimeString("en-GB", {
                 timeZone: process.env.TZ || "Asia/Kuala_Lumpur",
                 hour12: false,
               });
 
-              // Construct the structured parameter mapping blueprint object requested in Step 2
               const paymentPayload = {
                 student_name: result.gymnastName,
                 amount: result.amount,
@@ -275,27 +293,25 @@ async function startBot() {
                 reference_number: analysis.transaction_id || "N/A",
                 bank_or_platform: analysis.payment_method || "Instant Transfer",
                 receipt_number: result.receiptNumber,
-                month_term_covered: analysis.month_term_covered || "N/A",
+                payment_covered: analysis.payment_covered || "N/A",
+                revenue_start_date: analysis.revenue_start_date || "N/A",
               };
 
               try {
                 console.log(
                   "🎨 [PDF ENGINE] Constructing graphic transaction receipt canvas vector layouts...",
                 );
-                // Step 5: Render layout structure canvas vector parameters to memory buffer allocation arrays
                 const pdfBuffer =
                   await generateReceiptPdfBuffer(paymentPayload);
 
                 let matchedReply = `Thank you! Your official electronic statement receipt has been compiled and is attached below. 🙏`;
 
-                // Send the text validation update statement message baseline context anchor node
                 await sock.sendMessage(
                   remoteJid,
                   { text: matchedReply },
                   { quoted: msg },
                 );
 
-                // Step 6: Dispatch the raw buffer stream across WhatsApp as an official Document attachment asset node
                 await sock.sendMessage(
                   remoteJid,
                   {
