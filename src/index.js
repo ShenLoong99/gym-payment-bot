@@ -24,6 +24,7 @@ import {
   resetCrashCounter,
   sendTelegramDowntimeAlert,
 } from "./crashTracker.js";
+import { initializeReminderScheduler } from "./reminderService.js";
 
 dotenv.config();
 
@@ -166,6 +167,8 @@ async function startBot() {
       );
       resetCrashCounter();
       updateLastOnlineTimestamp();
+      global.sock = sock;
+      initializeReminderScheduler(sock);
     }
   });
 

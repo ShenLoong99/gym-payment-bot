@@ -1,13 +1,14 @@
 import { google } from "googleapis";
 import dotenv from "dotenv";
 import crypto from "crypto";
+import { getColumnLetter, formatSheetDate } from "./helper.js";
 
 dotenv.config();
 
 const auth = new google.auth.GoogleAuth({
   keyFile:
     process.env.GOOGLE_APPLICATION_CREDENTIALS || "./google-credentials.json",
-  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  scopes: [["https://www.googleapis.com/auth/spreadsheets"]],
 });
 
 const sheets = google.sheets({ version: "v4", auth });
@@ -17,59 +18,88 @@ function generateRecordId() {
   return crypto.randomBytes(4).toString("hex").toUpperCase();
 }
 
-async function findGymnastFromMasterList(recipientReference) {
+/**
+ * Helper to dynamically fetch the header row from any given tab and return it as a clean array of header names for flexible column index resolution in other operations
+ */
+async function getTabHeaders(tabName) {
   try {
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: "Master List!A:B",
+      range: `${tabName}!A1:Z1`, // Targets the first row dynamically
     });
+
     const rows = response.data.values;
-    if (!rows || rows.length <= 1) return null;
-
-    const lookupString = String(recipientReference).toLowerCase();
-
-    for (let i = 1; i < rows.length; i++) {
-      const gymnastId = rows[i][0] ? rows[i][0].trim() : "";
-      const gymnastName = rows[i][1] ? rows[i][1].trim() : "";
-
-      if (gymnastName.length <= 1) continue;
-
-      if (lookupString.includes(gymnastName.toLowerCase())) {
-        console.log(
-          `🎯 [MATCH FOUND] Linked name "${gymnastName}" to Gymnast ID: ${gymnastId}`,
-        );
-        return { id: gymnastId, name: gymnastName };
-      }
+    if (!rows || rows.length === 0) {
+      throw new Error(
+        `No headers found or tab is empty in sheet: "${tabName}"`,
+      );
     }
-    console.log(
-      `⚠️ [NO MATCH] Could not automatically resolve a Gymnast ID for: "${lookupString}"`,
+
+    // Return headers cleaned of leading/trailing whitespaces
+    return rows[0].map((header) => (header || "").trim());
+  } catch (error) {
+    console.error(
+      `❌ Failed to retrieve headers for tab "${tabName}":`,
+      error.message,
     );
-  } catch (err) {
-    console.error("❌ Master List Cross-Ref Error:", err.message);
+    throw error;
   }
-  return null;
 }
 
-async function isDuplicateTransaction(transactionId) {
-  if (!transactionId || transactionId.trim() === "" || transactionId === "null")
-    return false;
+/**
+ * Fetches the administrative cut-off day config number dynamically from the Config sheet
+ */
+async function getCutOffDay() {
   try {
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: "Payment History!J:J", // Points directly to Transaction ID column
+      range: "Config!A2",
     });
     const rows = response.data.values;
-    if (!rows) return false;
-
-    const cleanSearchId = transactionId.trim().toLowerCase();
-    return rows.some(
-      (row) =>
-        row[0] && row[0].replace(/['\s]/g, "").toLowerCase() === cleanSearchId,
-    );
+    if (rows && rows[0] && rows[0][0]) {
+      const cutOff = parseInt(rows[0][0].trim(), 10);
+      if (!isNaN(cutOff)) return cutOff;
+    }
   } catch (err) {
-    console.error("❌ Duplicate detection error:", err.message);
-    return false;
+    console.error(
+      "⚠️ Config retrieval failed. Defaulting cut-off to day 1:",
+      err.message,
+    );
   }
+  return 1;
+}
+
+/**
+ * Core Business Logic Rule Matrix Engine
+ */
+function calculateNextDueDate(startDateStr, paymentCovered, cutOffDay) {
+  if (!startDateStr || startDateStr.toLowerCase() === "n/a") return null;
+
+  const parts = startDateStr.split("/");
+  if (parts.length !== 3) return null;
+
+  let day = parseInt(parts[0], 10);
+  let month = parseInt(parts[1], 10) - 1;
+  let year = parseInt(parts[2], 10);
+
+  let targetDate = new Date(year, month, day);
+  let incrementMonths = 1;
+
+  const normalizedCovered = (paymentCovered || "").toLowerCase();
+  if (
+    normalizedCovered.includes("term") ||
+    normalizedCovered.includes("3 month")
+  ) {
+    incrementMonths = 3;
+  }
+
+  targetDate.setMonth(targetDate.getMonth() + incrementMonths);
+
+  if (targetDate.getDate() > cutOffDay) {
+    targetDate.setDate(cutOffDay);
+  }
+
+  return formatSheetDate(targetDate);
 }
 
 async function generateNextReceiptId(dateStr) {
@@ -85,9 +115,24 @@ async function generateNextReceiptId(dateStr) {
     const day = String(targetDate.getDate()).padStart(2, "0");
     const datePrefix = `AG${year}${month}${day}`;
 
+    // 1. Fetch headers dynamically from Payment History using your global helper
+    const headers = await getTabHeaders("Payment History");
+    const receiptIdColIdx = headers.indexOf("Receipt ID");
+
+    // Fallback if the column header name gets renamed or deleted
+    if (receiptIdColIdx === -1) {
+      throw new Error(
+        "'Receipt ID' column header name not found in Payment History tab.",
+      );
+    }
+
+    // 2. Resolve index dynamically to its spreadsheet column A1 letter notation
+    const colLetter = getColumnLetter(receiptIdColIdx);
+
+    // 3. Update the range string dynamically using the resolved column letter letter
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: "'Payment History'!N2:N5000", // Evaluates column N for receipt IDs
+      range: `'Payment History'!${colLetter}2:${colLetter}5000`, // Dynamically targets the correct column range
     });
 
     const rows = response.data.values;
@@ -111,6 +156,47 @@ async function generateNextReceiptId(dateStr) {
   }
 }
 
+export async function isDuplicateTransaction(transactionId) {
+  if (!transactionId || transactionId === "N/A") return false;
+
+  try {
+    // 1. Fetch headers dynamically from Payment History
+    const headers = await getTabHeaders("Payment History");
+    const txnIdColIdx = headers.indexOf("Transaction ID");
+
+    // Fallback: If column name is modified or missing, alert early safely
+    if (txnIdColIdx === -1) {
+      console.warn(
+        "⚠️ [DUPLICATE CHECK SKIPPED] 'Transaction ID' column not found in headers.",
+      );
+      return false;
+    }
+
+    // 2. Resolve index to its actual sheet A1 column letter notation dynamically
+    const colLetter = getColumnLetter(txnIdColIdx);
+
+    // 3. Request data rows using the dynamic column range letter
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `Payment History!${colLetter}:${colLetter}`,
+    });
+    const rows = response.data.values;
+    if (!rows) return false;
+
+    const cleanSearchId = transactionId.trim().toLowerCase();
+    return rows.some(
+      (row) =>
+        row[0] && row[0].replace(/['\s]/g, "").toLowerCase() === cleanSearchId,
+    );
+  } catch (err) {
+    console.error("❌ Duplicate detection error:", err.message);
+    return false;
+  }
+}
+
+/**
+ * Primary Exporter Module called directly by core Baileys network ingestion layer loops
+ */
 export async function appendPaymentRow(analysis, whatsappMeta) {
   try {
     const hasDuplicate = await isDuplicateTransaction(analysis.transaction_id);
@@ -121,58 +207,158 @@ export async function appendPaymentRow(analysis, whatsappMeta) {
       return { success: false, isDuplicate: true };
     }
 
-    const savedContact = whatsappMeta.pushName || whatsappMeta.phoneNumber;
-    const lookupText = analysis.recipient_reference || "";
+    const recordId = generateRecordId();
+    const now = new Date();
 
-    const resolvedGymnast = await findGymnastFromMasterList(lookupText);
-    const gymnastIdRef = resolvedGymnast ? resolvedGymnast.id : "";
-    const gymnastName = resolvedGymnast
-      ? resolvedGymnast.name
-      : analysis.gymnast_name || "Manual Review Required";
+    // Format timestamp exactly like GitHub template: YYYY-MM-DD HH:MM:SS
+    const formattedLogDate =
+      `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ` +
+      `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
 
     const receiptString = await generateNextReceiptId(
       analysis.transaction_date,
     );
 
-    const cleanTxnId =
-      analysis.transaction_id && analysis.transaction_id !== "null"
-        ? analysis.transaction_id
+    const gymnastName = analysis.gymnast_name || "Unknown Gymnast";
+
+    // 1. Fetch Master List data to resolve gymnast rows and track headers dynamically
+    const masterListRef = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: "Master List!A1:Z",
+    });
+
+    const masterRows = masterListRef.data.values;
+    let resolvedGymnast = null;
+    let matchedGymnastId = "N/A";
+
+    if (masterRows && masterRows.length > 0) {
+      const headers = await getTabHeaders("Master List");
+
+      const gymnastIdColIdx = headers.indexOf("ID");
+      const gymnastNameColIdx = headers.indexOf("Gymnast Name");
+      const nextDueDateColIdx = headers.indexOf("Next Due Date");
+      const paymentStatusColIdx = headers.indexOf("Payment Status");
+
+      if (gymnastNameColIdx !== -1) {
+        for (let i = 1; i < masterRows.length; i++) {
+          const row = masterRows[i];
+          if (
+            row[gymnastNameColIdx] &&
+            row[gymnastNameColIdx].trim().toLowerCase() ===
+              gymnastName.trim().toLowerCase()
+          ) {
+            if (gymnastIdColIdx !== -1 && row[gymnastIdColIdx]) {
+              matchedGymnastId = row[gymnastIdColIdx].trim();
+            }
+
+            resolvedGymnast = {
+              rowIndex: i + 1,
+              nextDueDateColIdx: nextDueDateColIdx,
+              paymentStatusColIdx: paymentStatusColIdx,
+            };
+            break;
+          }
+        }
+      }
+    }
+
+    // 2. Fetch Payment History structural headers to populate values dynamically by name
+    const historyHeaderRef = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: "Payment History!A1:Z1",
+    });
+
+    const historyHeaders =
+      historyHeaderRef.data.values?.[0]?.map((h) => (h || "").trim()) || [];
+    if (historyHeaders.length === 0) {
+      throw new Error(
+        "Critical: Payment History headers are completely missing or unreachable.",
+      );
+    }
+
+    // Map content using the exact structure criteria from the original GitHub logs
+    const historyDataMap = {
+      "Record ID": recordId,
+      "Transact Date": analysis.transaction_date || "N/A",
+      "Row Created": formattedLogDate,
+      "Saved Contact": whatsappMeta.pushName || "Unknown Profile",
+      "Phone Number": `'${whatsappMeta.phoneNumber}`,
+      "ID Ref": matchedGymnastId,
+      "Gymnast Name": gymnastName,
+      "Amount": analysis.amount,
+      "Reference": analysis.recipient_reference || "N/A",
+      "Transaction ID": `'${analysis.transaction_id || "N/A"}`,
+      "Payment Method": analysis.payment_method || "Instant Transfer",
+      "Payment Covered": analysis.payment_covered || "N/A",
+      "Revenue Start": analysis.revenue_start_date || "N/A",
+      "Receipt ID": receiptString,
+    };
+
+    // Construct the row array dynamically based on the header text sequence found
+    const paymentHistoryFields = historyHeaders.map((headerName) => {
+      return historyDataMap[headerName] !== undefined
+        ? historyDataMap[headerName]
         : "";
-    const cleanMethod = analysis.payment_method || "Instant Transfer";
+    });
 
-    const recordId = generateRecordId();
-
-    const now = new Date();
-    const formattedLogDate = `${String(now.getDate()).padStart(2, "0")}/${String(now.getMonth() + 1).padStart(2, "0")}/${now.getFullYear()} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}:${String(now.getSeconds()).padStart(2, "0")}`;
-
-    // Cleaned 14-Column Values Array
-    const rowValues = [
-      recordId, // Column A: Record ID
-      analysis.transaction_date, // Column B: Date
-      formattedLogDate, // Column C: Date Row Created
-      savedContact, // Column D: Saved Contact
-      `'${whatsappMeta.phoneNumber}`, // Column E: Phone Number
-      gymnastIdRef, // Column F: Gymnast ID Ref
-      gymnastName, // Column G: Gymnast Name
-      analysis.amount || 0, // Column H: Amount
-      lookupText, // Column I: Recipient Reference
-      `'${cleanTxnId}`, // Column J: Transaction ID
-      cleanMethod, // Column K: Payment Method
-      analysis.payment_covered, // Column L: Payment Covered (Enum dropdown)
-      analysis.revenue_start_date, // Column M: Revenue Start Date (YYYY-MM-DD)
-      receiptString, // Column N: Receipt ID
-    ];
-
+    // Write row back into tracking history tab
     await sheets.spreadsheets.values.append({
       spreadsheetId,
       range: "Payment History!A:N",
       valueInputOption: "USER_ENTERED",
-      requestBody: { values: [rowValues] },
+      requestBody: { values: [paymentHistoryFields] },
     });
-
     console.log(
       `📝 [SHEETS SUCCESS] Row logged with Record ID: ${recordId} | Created at: ${formattedLogDate}`,
     );
+
+    // 3. Conditionally update fields safely if targeted accurately by real-time text tags
+    if (resolvedGymnast && resolvedGymnast.rowIndex) {
+      const cutOffDay = await getCutOffDay();
+      const computedDueDate = calculateNextDueDate(
+        analysis.revenue_start_date,
+        analysis.payment_covered,
+        cutOffDay,
+      );
+
+      if (resolvedGymnast.paymentStatusColIdx !== -1) {
+        const statusLetter = getColumnLetter(
+          resolvedGymnast.paymentStatusColIdx,
+        );
+        const statusRange = `Master List!${statusLetter}${resolvedGymnast.rowIndex}`;
+
+        await sheets.spreadsheets.values.update({
+          spreadsheetId,
+          range: statusRange,
+          valueInputOption: "USER_ENTERED",
+          requestBody: { values: [["On Time"]] },
+        });
+        console.log(
+          `🎯 [MASTER LIST UPDATED] Set Payment Status to [On Time] in cell [${statusRange}]`,
+        );
+      }
+
+      if (computedDueDate && resolvedGymnast.nextDueDateColIdx !== -1) {
+        const dueDateLetter = getColumnLetter(
+          resolvedGymnast.nextDueDateColIdx,
+        );
+        const dueDateRange = `Master List!${dueDateLetter}${resolvedGymnast.rowIndex}`;
+
+        await sheets.spreadsheets.values.update({
+          spreadsheetId,
+          range: dueDateRange,
+          valueInputOption: "USER_ENTERED",
+          requestBody: { values: [[computedDueDate]] },
+        });
+        console.log(
+          `🎯 [MASTER LIST UPDATED] Set Next Due Date to [${computedDueDate}] in cell [${dueDateRange}] for gymnast: ${gymnastName}`,
+        );
+      }
+    } else {
+      console.warn(
+        "⚠️ [SKIPPED MASTER UPDATE] Could not resolve matching gymnast profile in Master List safely.",
+      );
+    }
 
     return {
       success: true,
@@ -181,7 +367,10 @@ export async function appendPaymentRow(analysis, whatsappMeta) {
       amount: analysis.amount || 0,
     };
   } catch (error) {
-    console.error("❌ Google Sheets sync runtime failure:", error.message);
-    return { success: false, error: error.message };
+    console.error(
+      "❌ Google Sheets Core Engine Processing Error:",
+      error.message,
+    );
+    throw error;
   }
 }
