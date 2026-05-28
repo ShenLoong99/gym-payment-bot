@@ -251,9 +251,9 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * Initializes scheduling configurations on engine system startup
  */
 export function initializeReminderScheduler(sock) {
-  // Job 1: Monthly automation pipeline -> Runs every 5th of the month at 9:00 AM
-  //   cron.schedule("0 10 5 * *", async () => {
-  cron.schedule("*/1 * * * *", async () => {
+  // Job 1: Monthly automation pipeline -> Runs every 10am on the day according to the cut-off day specified in the Config sheet (default to 1st of every month if config fetch fails)
+  // cron.schedule("*/1 * * * *", async () => {
+  cron.schedule("0 10 5 * *", async () => {
     console.log("⏰ [CRON] Automated Monthly billing event triggered.");
 
     // Fetch the dynamic cut-off day from Config sheet
