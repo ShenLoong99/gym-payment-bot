@@ -1,5 +1,5 @@
 {
   "bot_active": true,
-  "reply_receipt_active": true,
-  "reminder_active": true
+  "reply_receipt_active": false,
+  "reminder_active": false
 }

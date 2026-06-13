@@ -1,14 +1,15 @@
-import makeWASocket, {
+import {
   useMultiFileAuthState,
-  DisconnectReason,
   downloadMediaMessage,
+  makeWASocket,
+  Browsers,
+  DisconnectReason,
 } from "@whiskeysockets/baileys";
 import pino from "pino";
 import dotenv from "dotenv";
-import path from "path";
-import qrcode from "qrcode-terminal";
+import qrcode from "qrcode";
 import fs from "fs";
-
+import path from "path";
 import { extractReceiptData } from "./gemini.js";
 import { appendPaymentRow } from "./sheets.js";
 import { logEvent } from "./logger.js";
@@ -25,6 +26,7 @@ import {
   sendTelegramDowntimeAlert,
 } from "./crashTracker.js";
 import { initializeReminderScheduler } from "./reminderService.js";
+import { sendTelegramQrCode } from "./logger.js";
 
 dotenv.config();
 
@@ -46,6 +48,13 @@ function getFormattedLocalTime(dateObj = new Date()) {
       second: "2-digit",
     })
     .replace(/,/g, "");
+}
+
+function saveFile(buffer, dirPath, fileName, extension) {
+  if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
+  const filePath = path.join(dirPath, `${fileName}.${extension}`);
+  fs.writeFileSync(filePath, buffer);
+  return filePath;
 }
 
 function formatWhatsAppDate(timestampInSeconds) {
@@ -140,39 +149,53 @@ async function startBot() {
   const authFolder = path.resolve(
     process.env.SESSION_DATA_PATH || "./auth_info_baileys",
   );
+
+  console.log("DEBUG: Preparing Auth State...");
   const { state, saveCreds } = await useMultiFileAuthState(authFolder);
 
+  console.log("DEBUG: Initializing Socket...");
   const sock = makeWASocket({
     auth: state,
     logger: pino({ level: "silent" }),
-    receivedPendingNotifications: false, // Prevent processing backlog missed during downtime
+    printQRInTerminal: false,
+    // receivedPendingNotifications: false,
   });
 
+  console.log("DEBUG: Socket Created. Registering listeners...");
+  sock.ev.on("creds.update", saveCreds);
+
   sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+    console.log("DEBUG: Connection Update Received:", update);
+    const { connection, qr, lastDisconnect } = update;
+
+    // QR Generation Logic
     if (qr) {
-      console.log("\n--- SCAN THIS QR CODE WITH WHATSAPP ---");
-      qrcode.generate(qr, { small: true });
-      console.log("---------------------------------------\n");
+      const qrPath = "./temp_qr.png";
+      try {
+        await qrcode.toFile(qrPath, qr);
+        // Send the file to the owner via Telegram
+        await sendTelegramQrCode(qrPath); // Use a telegram photo helper
+        console.log("📡 [AUTH] QR code generated and sent to Telegram.");
+      } catch (err) {
+        console.error("❌ Failed to generate/send QR:", err.message);
+      }
     }
+
     if (connection === "close") {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      const shouldReconnect =
+        lastDisconnect?.error?.output?.statusCode !==
+        DisconnectReason.loggedOut;
       if (shouldReconnect) {
-        setTimeout(() => startBot(), 5000);
+        startBot(); // Reconnect if not explicitly logged out
       }
     } else if (connection === "open") {
-      console.log(
-        "\n✅ [ONLINE] Airborne Bot connected to WhatsApp successfully.",
-      );
-      resetCrashCounter();
+      console.log("✅ [ONLINE] WhatsApp Airborne Bot connected successfully.");
+      resetCrashCounter(); // This resets the crash-state.json file
       updateLastOnlineTimestamp();
       global.sock = sock;
       initializeReminderScheduler(sock);
     }
   });
-
-  sock.ev.on("creds.update", saveCreds);
 
   // Periodic heartbeat monitor script to update timestamp every 60 seconds
   const heartbeatInterval = setInterval(() => {
@@ -271,6 +294,28 @@ async function startBot() {
             const result = await appendPaymentRow(analysis, whatsappMeta);
 
             if (result.success) {
+              // GENERATE THE UNIQUE FOLDER PATH ONCE
+              const timestamp = new Date()
+                .toISOString()
+                .replace(/[:.]/g, "-")
+                .slice(0, 19);
+              const targetDir = path.join(
+                "./Payment",
+                `${timestamp}_${senderPhone}`,
+              );
+
+              // Get original filename (handle image vs pdf)
+              const originalFileName =
+                msg.message.documentMessage?.fileName?.replace(
+                  /\.[^/.]+$/,
+                  "",
+                ) || `payment_slip_${new Date().getTime()}`;
+              const extension =
+                targetMimeType === "application/pdf" ? "pdf" : "jpg";
+
+              // SAVE PAYMENT SLIP
+              saveFile(buffer, targetDir, originalFileName, extension);
+
               // REPLY & RECEIPT PIECE CHECK
               if (!isReplyAndReceiptAllowed()) {
                 console.warn(
@@ -278,6 +323,13 @@ async function startBot() {
                 );
                 continue; // Terminate execution early before generating PDF or sending messages
               }
+
+              // Generate Standardized Receipt Name: AG + YYYYMMDD + RunningNumber
+              const datePart = new Date()
+                .toISOString()
+                .slice(0, 10)
+                .replace(/-/g, "");
+              const receiptFileName = `AG${datePart}${result.receiptNumber}`;
 
               const now = new Date();
               const currentTimeStr = now.toLocaleTimeString("en-GB", {
@@ -304,8 +356,11 @@ async function startBot() {
                 console.log(
                   "🎨 [PDF ENGINE] Constructing graphic transaction receipt canvas vector layouts...",
                 );
+
                 const pdfBuffer =
                   await generateReceiptPdfBuffer(paymentPayload);
+
+                saveFile(pdfBuffer, targetDir, receiptFileName, "pdf");
 
                 let matchedReply = `Thank you! Your official electronic statement receipt has been compiled and is attached below. 🙏`;
 
@@ -320,13 +375,13 @@ async function startBot() {
                   {
                     document: pdfBuffer,
                     mimetype: "application/pdf",
-                    fileName: `Receipt_${paymentPayload.receipt_number}.pdf`,
+                    fileName: `${receiptFileName}.pdf`,
                   },
                   { quoted: msg },
                 );
 
                 console.log(
-                  `📦 [SUCCESS] PDF Invoice [Receipt_${paymentPayload.receipt_number}.pdf] dispatched across Baileys gateway network.`,
+                  `📦 [SUCCESS] PDF Invoice [${receiptFileName}.pdf] dispatched across Baileys gateway network.`,
                 );
               } catch (pdfError) {
                 console.error(

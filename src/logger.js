@@ -2,12 +2,14 @@ import fs from "fs";
 import path from "path";
 import axios from "axios";
 import dotenv from "dotenv";
+import { Telegraf } from "telegraf";
 
 dotenv.config();
 
 const logFilePath = path.resolve("./automation-events.log");
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
 /**
  * Standard event logging to local text files
@@ -66,5 +68,16 @@ export async function sendUniversalTelegramError(contextName, error) {
       "❌ Failed to push alert to Telegram API gateway:",
       err.response?.data || err.message,
     );
+  }
+}
+
+export async function sendTelegramQrCode(filePath) {
+  try {
+    await bot.telegram.sendPhoto(process.env.TELEGRAM_CHAT_ID, {
+      source: filePath,
+    });
+    console.log("✅ [TELEGRAM] QR code sent to admin.");
+  } catch (err) {
+    console.error("❌ [TELEGRAM] Failed to send QR code:", err.message);
   }
 }
